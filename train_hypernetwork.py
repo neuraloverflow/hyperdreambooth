@@ -1,4 +1,5 @@
-#@title train_dreambooth.py
+#@title train_hypernetwork.py
+# %%writefile hypernetwork/train_hypernetwork.py
 import argparse
 import math
 import os
@@ -252,13 +253,13 @@ def main():
     # Load models and create wrapper for stable diffusion
     text_encoder = CLIPTextModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=args.use_auth_token
-    )
+    ).to(accelerator.device)
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", use_auth_token=args.use_auth_token
-    )
+    ).to(accelerator.device)
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", use_auth_token=args.use_auth_token
-    )
+    ).to(accelerator.device)
 
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -358,9 +359,9 @@ def main():
     )
 
     # Move unet, text_encode and vae to gpu
-    unet.to(accelerator.device)
-    text_encoder.to(accelerator.device)
-    vae.to(accelerator.device)
+#     unet.to(accelerator.device)
+#     text_encoder.to(accelerator.device)
+#     vae.to(accelerator.device)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
