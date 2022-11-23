@@ -160,6 +160,11 @@ def parse_args():
     )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument(
+        "--xformers",
+        action="store_true",
+        help="use xtransformers",
+    )
+    parser.add_argument(
         "--tags_dir",
         type=str,
         default=None,
@@ -186,12 +191,6 @@ def parse_args():
 
     if args.instance_data_dir is None:
         raise ValueError("You must specify a train data directory.")
-
-    if args.with_prior_preservation:
-        if args.class_data_dir is None:
-            raise ValueError("You must specify a data directory for class images.")
-        if args.class_prompt is None:
-            raise ValueError("You must specify prompt for class images.")
 
     return args
 
@@ -268,7 +267,7 @@ def main():
     text_encoder.eval()
     vae.eval()
 
-    if args.xtranformers:
+    if args.xformers:
         unet.set_use_memory_efficient_attention_xformers(True)
 
     # add hypernetwork

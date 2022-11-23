@@ -2,7 +2,7 @@
 
 import os
 import torch
-
+from torch.nn.init import normal_
 
 class HypernetworkModule(torch.nn.Module):
     multiplier = 1.0
@@ -10,19 +10,22 @@ class HypernetworkModule(torch.nn.Module):
     def __init__(self, dim, state_dict=None):
         super().__init__()
 
-        self.linear1 = torch.nn.Linear(dim, dim * 2)
-        self.linear2 = torch.nn.Linear(dim * 2, dim)
+        linears = []
+        linears.append(torch.nn.Linear(dim, dim * 2))
+        linears.append(torch.nn.Linear(dim * 2, dim))
+        self.linear = torch.nn.Sequential(*linears)
 
         if state_dict is not None:
             self.load_state_dict(state_dict, strict=True)
         else:
-            self.linear1.weight.data.normal_(mean=0.0, std=0.01)
-            self.linear1.bias.data.zero_()
-            self.linear2.weight.data.normal_(mean=0.0, std=0.01)
-            self.linear2.bias.data.zero_()
+            for layer in self.linear:
+                if type(layer) == torch.nn.Linear or type(layer) == torch.nn.LayerNorm:
+                    w, b = layer.weight.data, layer.bias.data
+                    normal_(w, mean=0.0, std=0.01)
+                    normal_(b, mean=0.0, std=0)
 
     def forward(self, x):
-        return x + (self.linear2(self.linear1(x))) * self.multiplier
+        return x + self.linear(x) * self.multiplier
 
     def trainables(self):
         layer_structure = []

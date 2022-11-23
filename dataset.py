@@ -1,12 +1,13 @@
 import random
 from pathlib import Path
+import numpy as np
 from PIL import Image
 from torchvision import transforms
 
 from torch.utils.data import Dataset
 
 import torchvision.transforms.functional as TF
-import random
+
 
 class RandomResize:
     def __init__(self, from_size, to_size):
