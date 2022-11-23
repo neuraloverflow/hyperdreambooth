@@ -165,6 +165,19 @@ def parse_args():
         default=None,
         help="Tag file path",
     )
+    parser.add_argument(
+        "--test_prompt",
+        type=str,
+        default=None,
+        help="実行中に出力する用のプロンプト.",
+    )
+
+    parser.add_argument(
+        "--test_seeds",
+        type=str,
+        default=None,
+        help="実行中に出力する用のプロンプトのシード.1,2,3のようにカンマで指定する",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -424,6 +437,43 @@ def main():
                 break
 
         accelerator.wait_for_everyone()
+
+        # create test image
+        if args.test_prompt is not None:
+            from create_image import create_image
+            from diffusers.schedulers import DPMSolverMultistepScheduler
+            scheduler = DPMSolverMultistepScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000,
+                trained_betas=None,
+                predict_epsilon=True,
+                thresholding=False,
+                algorithm_type="dpmsolver++",
+                solver_type="midpoint",
+                lower_order_final=True,
+            )
+
+            if args.test_seeds is not None:
+                test_seeds = map(int, str(args.test_seeds).split(","))
+            else:
+                test_seeds = [0]
+            out_path = Path("images")
+            out_path.mkdir(exist_ok=True)
+            with torch.no_grad():
+                with torch.autocast("cuda"):
+                    for seed in test_seeds:
+                        generator = torch.Generator("cuda").manual_seed(seed)
+                        text_encoder.eval()
+                        img = create_image(
+                            text_encoder, vae, unet, tokenizer, scheduler,
+                            prompt=args.test_prompt,
+                            generator=generator,
+                            num_inference_steps=25,
+                        )
+                        img.save(out_path / f"{epoch:03d}_{seed}.png")
+            print(f"saved figure: {out_path}")
 
     # Create the pipeline using using the trained modules and save it.
     if accelerator.is_main_process:
