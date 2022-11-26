@@ -39,6 +39,7 @@ class DreamBoothDatasetWithTags(Dataset):
         instance_prompt,
         tokenizer,
         tags=None,
+        flip=False,
         add_pad=True,
         new_word_pairs=[],
     ):
@@ -61,16 +62,12 @@ class DreamBoothDatasetWithTags(Dataset):
         self.add_pad = add_pad
         self.new_word_list = [w.replace("<", "").replace(">", "") for _, w in new_word_pairs]
 
-        self.image_transforms = transforms.Compose(
-            [
-                # transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-                # transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
-                RandomResize(300, 768),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
+        image_transforms = [RandomResize(512, 768)]
+        if flip:
+            image_transforms.append(transforms.RandomHorizontalFlip(p=0.5))
+        image_transforms.append(transforms.ToTensor())
+        image_transforms.append(transforms.Normalize([0.5], [0.5]))
+        self.image_transforms = transforms.Compose(image_transforms)
 
     def __len__(self):
         return self._length

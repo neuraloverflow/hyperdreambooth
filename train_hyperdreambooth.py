@@ -1,8 +1,9 @@
-#@title train_hypernetwork.py
-# %%writefile hypernetwork/train_hypernetwork.py
+#@title train_dreambooth.py
 import argparse
 import math
 import os
+import gc
+import itertools
 import pickle
 from pathlib import Path
 from typing import Optional
@@ -166,6 +167,16 @@ def parse_args():
         help="use xtransformers",
     )
     parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
+    )
+    parser.add_argument(
+        "--clip_penultimate",
+        action="store_true",
+        help="CLIPの最後から2層目を使う",
+    )
+    parser.add_argument(
         "--tags_dir",
         type=str,
         default=None,
@@ -177,7 +188,6 @@ def parse_args():
         default=None,
         help="実行中に出力する用のプロンプト.",
     )
-
     parser.add_argument(
         "--test_seeds",
         type=str,
@@ -204,6 +214,13 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
         return f"{username}/{model_id}"
     else:
         return f"{organization}/{model_id}"
+
+
+def save_model(path, unet, text_encoder):
+    path = Path(path)
+    path.mkdir(exist_ok=True, parents=True)
+    torch.save(unet.state_dict(), path / 'unet.pth')
+    torch.save(text_encoder.state_dict(), path / 'text_encoder.pth')
 
 
 def main():
@@ -260,19 +277,28 @@ def main():
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", use_auth_token=args.use_auth_token
     ).to(accelerator.device)
-
-    unet.requires_grad_(False)
-    text_encoder.requires_grad_(False)
-    vae.requires_grad_(False)
-    unet.eval()
-    text_encoder.eval()
-    vae.eval()
-
+    
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     if args.xformers:
         unet.set_use_memory_efficient_attention_xformers(True)
+    
+    if args.gradient_checkpointing:
+        unet.enable_gradient_checkpointing()
+        text_encoder.gradient_checkpointing_enable()
+
+    # 念の為
+    unet.requires_grad_(True)
+    text_encoder.requires_grad_(True)
+    
+    vae.requires_grad_(False)
+    vae.eval()
 
     # add hypernetwork
-    enable_sizes = [768, 320, 640, 1280]
+    enable_sizes = [["mid", s] for s in [768, 320, 640, 1280]]
+    enable_sizes += [["down", s] for s in [768, 320, 640, 1280]]
+    enable_sizes += [["up", s] for s in [768, 320, 640, 1280]]
     shared.hypernetworks = Hypernetwork(args.hypernet_name, enable_sizes)
     shared.hypernetworks.to(accelerator.device)
 
@@ -298,8 +324,14 @@ def main():
     else:
         optimizer_class = torch.optim.AdamW
 
+    trainable_params = itertools.chain(
+        unet.parameters(),
+        text_encoder.parameters(),
+        weights
+    )
+
     optimizer = optimizer_class(
-        weights,  # optimize hypernetwork
+        trainable_params,
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -315,6 +347,7 @@ def main():
         instance_prompt=args.instance_prompt,
         tokenizer=tokenizer,
         tags=tags_list,
+        flip=False,
     )
 
     def collate_fn(examples):
@@ -354,14 +387,9 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        optimizer, train_dataloader, lr_scheduler
+    unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, text_encoder, optimizer, train_dataloader, lr_scheduler
     )
-
-    # Move unet, text_encode and vae to gpu
-#     unet.to(accelerator.device)
-#     text_encoder.to(accelerator.device)
-#     vae.to(accelerator.device)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -373,7 +401,7 @@ def main():
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers("hypernet", config=vars(args))
+        accelerator.init_trackers("dreambooth+hypernet", config=vars(args))
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -387,56 +415,83 @@ def main():
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(
+        range(args.max_train_steps),
+        disable=not accelerator.is_local_main_process,
+        dynamic_ncols=True
+    )
     progress_bar.set_description("Steps")
     global_step = 0
+    
+    def save_all(unet, text_encoder, label):
+        sub_dir = Path(f"{args.output_dir}/{label}")
+        sub_dir.mkdir(exist_ok=True, parents=True)
+        
+        shared.hypernetworks.save(sub_dir / "hn.pt")
+        save_model(
+            f"{sub_dir}",
+            unet=accelerator.unwrap_model(unet),
+            text_encoder=accelerator.unwrap_model(text_encoder)
+        )
 
     for epoch in range(args.num_train_epochs):
+        unet.train()
+        text_encoder.train()
         for step, batch in enumerate(train_dataloader):
-            # Convert images to latent space
-            with torch.no_grad():
-                latents = vae.encode(batch["pixel_values"]).latent_dist.sample()
-                latents = latents * 0.18215
+            with accelerator.accumulate(unet):
+                # Convert images to latent space
+                with torch.no_grad():
+                    latents = vae.encode(batch["pixel_values"]).latent_dist.sample()
+                    latents = latents * 0.18215
 
-            # Sample noise that we'll add to the latents
-            noise = torch.randn(latents.shape).to(latents.device)
-            bsz = latents.shape[0]
-            # Sample a random timestep for each image
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-            timesteps = timesteps.long()
+                # Sample noise that we'll add to the latents
+                noise = torch.randn(latents.shape).to(latents.device)
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = timesteps.long()
 
-            # Add noise to the latents according to the noise magnitude at each timestep
-            # (this is the forward diffusion process)
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                # Add noise to the latents according to the noise magnitude at each timestep
+                # (this is the forward diffusion process)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-            # Get the text embedding for conditioning
-            with torch.no_grad():
-                encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                # Get the text embedding for conditioning
+                # with torch.no_grad():
+                encoder_hidden_states = text_encoder(batch['input_ids'], output_hidden_states=True)
+                if args.clip_penultimate:
+                    encoder_hidden_states = text_encoder.text_model.final_layer_norm(encoder_hidden_states['hidden_states'][-2])
+                else:
+                    encoder_hidden_states = encoder_hidden_states.last_hidden_state
 
-            # Predict the noise residual
-            noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                # Predict the noise residual
+                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
-            loss = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean() * batch['weights']
+                loss = F.mse_loss(noise_pred, noise, reduction="none").mean([1, 2, 3]).mean() * batch['weights']
 
-            accelerator.backward(loss)
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(itertools.chain(unet.parameters(), text_encoder.parameters()), args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                shared.hypernetworks.step += 1
 
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
-            shared.hypernetworks.step += 1
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    global_step += 1
 
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
-
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
-            if global_step >= args.max_train_steps:
-                break
+                logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
+                if global_step >= args.max_train_steps:
+                    break
 
         accelerator.wait_for_everyone()
+        
+        # save models
+        if epoch % 3 == 0:
+            save_all(unet, text_encoder, f"{global_step}")
 
         # create test image
         if args.test_prompt is not None:
@@ -459,7 +514,7 @@ def main():
                 test_seeds = map(int, str(args.test_seeds).split(","))
             else:
                 test_seeds = [0]
-            out_path = Path("images")
+            out_path = Path(f"{args.output_dir}/images")
             out_path.mkdir(exist_ok=True)
             with torch.no_grad():
                 with torch.autocast("cuda"):
@@ -472,13 +527,12 @@ def main():
                             generator=generator,
                             num_inference_steps=25,
                         )
-                        img.save(out_path / f"{epoch:03d}_{seed}.png")
+                        img.save(out_path / f"{seed}_{global_step:03d}.png")
             print(f"saved figure: {out_path}")
 
     # Create the pipeline using using the trained modules and save it.
     if accelerator.is_main_process:
-        output_dir = args.output_dir + "/last.pt"
-        shared.hypernetworks.save(output_dir)
+        save_all(unet, text_encoder, f"{global_step}")
 
     accelerator.end_training()
 

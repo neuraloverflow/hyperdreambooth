@@ -11,8 +11,14 @@ class HypernetworkModule(torch.nn.Module):
         super().__init__()
 
         linears = []
-        linears.append(torch.nn.Linear(dim, dim * 2))
-        linears.append(torch.nn.Linear(dim * 2, dim))
+#         linears.append(torch.nn.Linear(dim, dim * 2))
+#         linears.append(torch.nn.Linear(dim * 2, dim))
+        # linears.append(torch.nn.ReLU())
+        linears.append(torch.nn.Linear(dim, dim * 4))
+        linears.append(torch.nn.Hardswish())
+        linears.append(torch.nn.Linear(dim * 4, dim * 4))
+        linears.append(torch.nn.Hardswish())
+        linears.append(torch.nn.Linear(dim * 4, dim))
         self.linear = torch.nn.Sequential(*linears)
 
         if state_dict is not None:
@@ -47,8 +53,8 @@ class Hypernetwork:
         self.sd_checkpoint = None
         self.sd_checkpoint_name = None
 
-        for size in enable_sizes or []:
-            self.layers[size] = (HypernetworkModule(size), HypernetworkModule(size))
+        for key, size in enable_sizes or []:
+            self.layers[f"{key}_{size}"] = (HypernetworkModule(size), HypernetworkModule(size))
 
     def to(self, device):
         for k, layers in self.layers.items():

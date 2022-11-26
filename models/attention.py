@@ -101,6 +101,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         num_vector_embeds: Optional[int] = None,
         activation_fn: str = "geglu",
         num_embeds_ada_norm: Optional[int] = None,
+        part: str = None,
     ):
         super().__init__()
         self.num_attention_heads = num_attention_heads
@@ -154,6 +155,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
                     activation_fn=activation_fn,
                     num_embeds_ada_norm=num_embeds_ada_norm,
                     attention_bias=attention_bias,
+                    part=part,
                 )
                 for d in range(num_layers)
             ]
@@ -370,6 +372,7 @@ class BasicTransformerBlock(nn.Module):
         activation_fn: str = "geglu",
         num_embeds_ada_norm: Optional[int] = None,
         attention_bias: bool = False,
+        part: str = None,
     ):
         super().__init__()
         self.attn1 = CrossAttention(
@@ -378,6 +381,7 @@ class BasicTransformerBlock(nn.Module):
             dim_head=attention_head_dim,
             dropout=dropout,
             bias=attention_bias,
+            part=part,
         )  # is a self-attention
         self.ff = FeedForward(dim, dropout=dropout, activation_fn=activation_fn)
         self.attn2 = CrossAttention(
@@ -387,6 +391,7 @@ class BasicTransformerBlock(nn.Module):
             dim_head=attention_head_dim,
             dropout=dropout,
             bias=attention_bias,
+            part=part,
         )  # is self-attn if context is none
 
         # layer norms
@@ -481,6 +486,7 @@ class CrossAttention(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.0,
         bias=False,
+        part : str = None,
     ):
         super().__init__()
         inner_dim = dim_head * heads
@@ -493,6 +499,7 @@ class CrossAttention(nn.Module):
         # You can set slice_size with `set_attention_slice`
         self._slice_size = None
         self._use_memory_efficient_attention_xformers = False
+        self.part = part
 
         self.to_q = nn.Linear(query_dim, inner_dim, bias=bias)
         self.to_k = nn.Linear(cross_attention_dim, inner_dim, bias=bias)
@@ -524,7 +531,7 @@ class CrossAttention(nn.Module):
 
         # apply hypernetwork
         if shared.hypernetworks is not None:
-            layers = shared.hypernetworks.layers.get(context.shape[2], None)
+            layers = shared.hypernetworks.layers.get(f"{self.part}_{context.shape[2]}", None)
             if layers is not None:
                 context_k = layers[0](context)
                 context_v = layers[1](context)
