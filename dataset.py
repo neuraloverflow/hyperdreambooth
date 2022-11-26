@@ -41,6 +41,8 @@ class DreamBoothDatasetWithTags(Dataset):
         tags=None,
         flip=False,
         add_pad=True,
+        min_size=300,
+        max_size=768,
         new_word_pairs=[],
     ):
         self.tokenizer = tokenizer
@@ -62,7 +64,7 @@ class DreamBoothDatasetWithTags(Dataset):
         self.add_pad = add_pad
         self.new_word_list = [w.replace("<", "").replace(">", "") for _, w in new_word_pairs]
 
-        image_transforms = [RandomResize(512, 768)]
+        image_transforms = [RandomResize(min_size, max_size)]
         if flip:
             image_transforms.append(transforms.RandomHorizontalFlip(p=0.5))
         image_transforms.append(transforms.ToTensor())

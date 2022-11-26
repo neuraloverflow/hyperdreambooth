@@ -194,6 +194,23 @@ def parse_args():
         default=None,
         help="実行中に出力する用のプロンプトのシード.1,2,3のようにカンマで指定する",
     )
+    parser.add_argument(
+        "--flip",
+        action="store_true",
+        help="反転した画像を学習するか",
+    )
+    parser.add_argument(
+        "--resize_min_size",
+        type=int,
+        default=300,
+        help="リサイズの際の最小サイズ",
+    )
+    parser.add_argument(
+        "--resize_max_size",
+        type=int,
+        default=768,
+        help="リサイズの際の最大サイズ",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -347,7 +364,9 @@ def main():
         instance_prompt=args.instance_prompt,
         tokenizer=tokenizer,
         tags=tags_list,
-        flip=False,
+        flip=args.flip,
+        min_size=args.resize_min_size,
+        max_size=args.resize_max_size,
     )
 
     def collate_fn(examples):
@@ -491,7 +510,7 @@ def main():
         
         # save models
         if epoch % 3 == 0:
-            save_all(unet, text_encoder, f"{global_step}")
+            save_all(unet, text_encoder, f"last")
 
         # create test image
         if args.test_prompt is not None:
@@ -532,7 +551,7 @@ def main():
 
     # Create the pipeline using using the trained modules and save it.
     if accelerator.is_main_process:
-        save_all(unet, text_encoder, f"{global_step}")
+        save_all(unet, text_encoder, f"last")
 
     accelerator.end_training()
 
